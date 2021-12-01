@@ -1,0 +1,189 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxy-app
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registrypullsecret
+  namespace: proxy-app
+data:
+  .dockerconfigjson: <Docker accont token>
+type: kubernetes.io/dockerconfigjson 
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-secret
+  namespace: proxy-app
+type: Opaque
+stringData:
+  JWT_SECRET: tsaphlnsjwBGJWAn3MSKWAHnxLABRPOXs8U74EXop9NycAmqPkTwGiemHbjazprVBB7Drx8kZFl6WjYdafGZJQ==
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitmproxy-auth
+  namespace: proxy-app
+  labels:
+    app: mitmproxy-auth
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mitmproxy-auth
+  template:
+    metadata:
+      labels:
+        app: mitmproxy-auth
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - mitmproxy-auth
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: mitmproxy-auth
+          image: puvel/mitmproxy-auth
+          ports:
+            - containerPort: 8080
+            - containerPort: 8081
+          command: ["mitmweb"]
+          args: ["-s", "authorization.py"] 
+          envFrom:
+          - secretRef:
+              name: jwt-secret
+      imagePullSecrets:
+        - name: registrypullsecret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitmproxy-auth-service
+  namespace: proxy-app
+spec:
+  selector:
+    app: mitmproxy-auth
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-server
+  namespace: proxy-app
+  labels:
+    app: auth-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-server
+  template:
+    metadata:
+      labels:
+        app: auth-server
+    spec:
+      containers:
+        - name: auth-server
+          image: puvel/auth-server
+          ports:
+            - containerPort: 8080
+          envFrom:
+          - secretRef:
+              name: jwt-secret
+      imagePullSecrets:
+        - name: registrypullsecret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: proxy-app
+spec:
+  selector:
+    app: auth-server
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stat-server
+  namespace: proxy-app
+  labels:
+    app: stat-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stat-server
+  template:
+    metadata:
+      labels:
+        app: stat-server
+    spec:
+      containers:
+        - name: stat-server
+          image: puvel/stat-server
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MY_PROXY_URL
+              value: "mitmproxy-auth-service.proxy-app.svc.cluster.local"
+            - name: MY_PROXY_PORT
+              value: "8080"
+          envFrom:
+          - secretRef:
+              name: jwt-secret
+      imagePullSecrets:
+        - name: registrypullsecret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stat-service
+  namespace: proxy-app
+spec:
+  selector:
+    app: stat-server
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: proxy-app
+  namespace: proxy-app
+spec:
+  rules:
+    - host: proxy.puvel.ru
+      http:
+        paths:
+          - path: /statistic
+            pathType: Prefix
+            backend:
+              service:
+                name: stat-service
+                port:
+                  number: 8080 
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 8080 
+---
